@@ -1,6 +1,8 @@
 import requests
 import os
 import bibtexparser
+import difflib
+import functools
 
 keep_field = {
     'article': ['title', 'author', 'journal', 'year', 'volume', 'number', 'pages'],
@@ -12,12 +14,13 @@ venue_field = {
     'inproceedings': 'booktitle',
 }
 
-def beautify_bibtex(item):
+
+def get_bibtex_from_dblp(item):
     item_bib_str = requests.get(item["info"]["url"] + ".bib?param=1", verify=False).text
     item_bib = bibtexparser.parse_string(item_bib_str).entries[0]
     item_bib.fields = [field for field in item_bib.fields if field.key in keep_field[item_bib.entry_type]]
     if item["info"]["type"] in ["Journal Articles", "Conference and Workshop Papers"]:
-        kw = {"q": "/".join(item["info"]["key"].split("/")[:2]), "format": "json"}
+        kw = {"q": "/".join(item["info"]["key"].split("/")[:2]), "format": "json", "h": 1000}
         venue = requests.get("https://dblp.org/search/venue/api", params=kw, verify=False).json()
         for item_venue in venue["result"]['hits']['hit']:
             if item_venue["info"]["url"] == 'https://dblp.org/db/' + "/".join(item["info"]["key"].split("/")[:2]) + "/":
@@ -33,6 +36,28 @@ def beautify_bibtex(item):
     return item_bib
 
 
+def search_bibtex(title):
+    kw = {"q": title, "format": "json"}
+    res = requests.get("https://dblp.org/search/publ/api", verify=False, params=kw).json()
+
+    def cmp(x, y):
+        informal = 'Informal and Other Publications'
+        if x['info']['type'] == informal and y['info']['type'] != informal:
+            return -1
+        if x['info']['type'] != informal and y['info']['type'] == informal:
+            return 1
+        a = difflib.SequenceMatcher(None, title, x['info']['title']).ratio()
+        b = difflib.SequenceMatcher(None, title, y['info']['title']).ratio()
+        return a - b
+
+    item = sorted(res['result']['hits']['hit'], key=functools.cmp_to_key(cmp), reverse=True)
+    item = item[0]
+    title_threshold = difflib.SequenceMatcher(None, title, item['info']['title']).ratio()
+    if title_threshold > 0.9:
+        return item
+    raise Exception("not found")
+
+
 def beautify(bibtex_str):
     library = bibtexparser.parse_string(bibtex_str)
     print(f"Parsed {len(library.blocks)} blocks, including:"
@@ -43,21 +68,11 @@ def beautify(bibtex_str):
     formatted_bibtex = bibtexparser.Library()
     for entry in library.entries:
         try:
-            kw = {"q": entry["title"], "format": "json", "h": 1000}
-            res = requests.get("https://dblp.org/search/publ/api", verify=False, params=kw).json()
-            for item in res['result']['hits']['hit']:
-                # check title
-                title_len = len(entry["title"].split(" "))
-                score = float(item['@score'])
-                if score < 0.8 * title_len:
-                    continue
-                # check author
-                ...
-                if score > 0.8 * title_len:
-                    formatted_bibtex.add(beautify_bibtex(item))
-                    break
-        except:
-            ...
+            item = search_bibtex(entry['title'])
+            formatted_bibtex.add(get_bibtex_from_dblp(item))
+        except Exception as e:
+            formatted_bibtex.add(entry)
+            print(str(e))
     return formatted_bibtex
 
 
