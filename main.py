@@ -3,22 +3,37 @@ import os
 import bibtexparser
 import difflib
 import functools
+import warnings
+from tqdm import tqdm
+
+warnings.filterwarnings(action='ignore')
 
 keep_field = {
     'article': ['title', 'author', 'journal', 'year', 'volume', 'number', 'pages'],
     'inproceedings': ['title', 'author', 'booktitle', 'year', 'pages'],
+    'booklet': [],
+    'conference': [],
+    'inbook': [],
+    'incollection': ['title', 'author', 'booktitle', 'year', 'series', 'volume', 'pages'],
+    'manual': [],
+    'mastersthesis': [],
+    'misc': [],
+    'proceedings': [],
+    'techreport': [],
+    'unpublished': [],
 }
 
 venue_field = {
     'article': 'journal',
     'inproceedings': 'booktitle',
+    'incollection': 'booktitle',
 }
 
 
 def get_bibtex_from_dblp(item):
     item_bib_str = requests.get(item["info"]["url"] + ".bib?param=1", verify=False).text
     item_bib = bibtexparser.parse_string(item_bib_str).entries[0]
-    item_bib.fields = [field for field in item_bib.fields if field.key in keep_field[item_bib.entry_type]]
+    # update venue name
     if item["info"]["type"] in ["Journal Articles", "Conference and Workshop Papers"]:
         kw = {"q": "/".join(item["info"]["key"].split("/")[:2]), "format": "json", "h": 1000}
         venue = requests.get("https://dblp.org/search/venue/api", params=kw, verify=False).json()
@@ -36,26 +51,34 @@ def get_bibtex_from_dblp(item):
     return item_bib
 
 
+def remove_useless_field(item_bib):
+    item_bib.fields = [field for field in item_bib.fields if field.key in keep_field[item_bib.entry_type]]
+
+
 def search_bibtex(title):
     kw = {"q": title, "format": "json"}
     res = requests.get("https://dblp.org/search/publ/api", verify=False, params=kw).json()
+    
+    if res['result']['hits']['@total'] == "0":
+        raise Exception("not found: %s" % title)
 
     def cmp(x, y):
+        a = difflib.SequenceMatcher(None, title, x['info']['title']).ratio()
+        b = difflib.SequenceMatcher(None, title, y['info']['title']).ratio()
+        if a != b:
+            return a - b
         informal = 'Informal and Other Publications'
         if x['info']['type'] == informal and y['info']['type'] != informal:
             return -1
         if x['info']['type'] != informal and y['info']['type'] == informal:
             return 1
-        a = difflib.SequenceMatcher(None, title, x['info']['title']).ratio()
-        b = difflib.SequenceMatcher(None, title, y['info']['title']).ratio()
-        return a - b
-
+        return 0
     item = sorted(res['result']['hits']['hit'], key=functools.cmp_to_key(cmp), reverse=True)
     item = item[0]
     title_threshold = difflib.SequenceMatcher(None, title, item['info']['title']).ratio()
     if title_threshold > 0.9:
         return item
-    raise Exception("not found")
+    raise Exception("not found: %s, first one: %s" % (title, item['info']['title']))
 
 
 def beautify(bibtex_str):
@@ -66,33 +89,27 @@ def beautify(bibtex_str):
           f"\n\t{len(library.strings)} strings and"
           f"\n\t{len(library.preambles)} preambles")
     formatted_bibtex = bibtexparser.Library()
-    for entry in library.entries:
+    for entry in tqdm(library.entries):
         try:
-            item = search_bibtex(entry['title'])
-            formatted_bibtex.add(get_bibtex_from_dblp(item))
+            title = ' '.join(entry["title"].split()).replace("\n", "")
+            item = search_bibtex(title)
+            item = get_bibtex_from_dblp(item)
+            remove_useless_field(item)
+            item.key = entry.key
+            formatted_bibtex.add(item)
         except Exception as e:
+            remove_useless_field(entry)
             formatted_bibtex.add(entry)
-            print(str(e))
+            print('update from dblp failed: ', title)
     return formatted_bibtex
 
 
 def main():
-    bibtex_str = """
-@article{DBLP:journals/tist/YangLCT19,
-  author       = {Qiang Yang and
-                  Yang Liu and
-                  Tianjian Chen and
-                  Yongxin Tong},
-  title        = {Federated Machine Learning: Concept and Applications},
-  journal      = {{ACM} Transactions on Intelligent Systems and Technology},
-  volume       = {10},
-  number       = {2},
-  pages        = {12:1--12:19},
-  year         = {2019},
-}
-    """
+    f = open("1.bib", "r")
+    bibtex_str = f.read()
     a = bibtexparser.write_string(beautify(bibtex_str))
-    print(a)
+    f = open("2.bib", "w")
+    f.write(a)
 
 
 if __name__ == "__main__":
